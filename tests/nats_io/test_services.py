@@ -151,7 +151,7 @@ async def test_fetch_returns_and_acks_messages(
     m1 = _msg("voice.queue", b'{"message": "one"}', 1, {"k": "v"})
     m2 = _msg("voice.queue", b"plain text", 2)
     psub = MagicMock()
-    psub.consumer_info = AsyncMock(return_value=SimpleNamespace(num_pending=2))
+    psub.consumer_info = AsyncMock(return_value=SimpleNamespace(num_pending=2, num_ack_pending=0))
     psub.fetch = AsyncMock(return_value=[m1, m2])
     js = nc.jetstream.return_value
     js.pull_subscribe_bind = AsyncMock(return_value=psub)
@@ -180,7 +180,7 @@ async def test_fetch_ack_false_leaves_messages(
     """ack: false peeks; messages are redelivered after ack_wait."""
     m1 = _msg("voice.queue", b"x", 1)
     psub = MagicMock()
-    psub.consumer_info = AsyncMock(return_value=SimpleNamespace(num_pending=1))
+    psub.consumer_info = AsyncMock(return_value=SimpleNamespace(num_pending=1, num_ack_pending=0))
     psub.fetch = AsyncMock(return_value=[m1])
     nc.jetstream.return_value.pull_subscribe_bind = AsyncMock(return_value=psub)
 
@@ -201,7 +201,7 @@ async def test_fetch_empty_queue_does_not_wait(
 ) -> None:
     """With nothing pending the action returns at once without a pull."""
     psub = MagicMock()
-    psub.consumer_info = AsyncMock(return_value=SimpleNamespace(num_pending=0))
+    psub.consumer_info = AsyncMock(return_value=SimpleNamespace(num_pending=0, num_ack_pending=0))
     psub.fetch = AsyncMock()
     nc.jetstream.return_value.pull_subscribe_bind = AsyncMock(return_value=psub)
 
@@ -217,12 +217,40 @@ async def test_fetch_empty_queue_does_not_wait(
     psub.fetch.assert_not_awaited()
 
 
+async def test_fetch_includes_redeliverable_messages(
+    hass: HomeAssistant, entry: MockConfigEntry, nc: MagicMock
+) -> None:
+    """Unacked messages past ack_wait are redelivered, so they must be pulled too.
+
+    JetStream counts them in num_ack_pending, not num_pending.
+    """
+    m1 = _msg("voice.queue", b"again", 1)
+    psub = MagicMock()
+    psub.consumer_info = AsyncMock(
+        return_value=SimpleNamespace(num_pending=0, num_ack_pending=1)
+    )
+    psub.fetch = AsyncMock(return_value=[m1])
+    nc.jetstream.return_value.pull_subscribe_bind = AsyncMock(return_value=psub)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "fetch",
+        {"stream": "VOICE", "consumer": "digest"},
+        blocking=True,
+        return_response=True,
+    )
+
+    psub.fetch.assert_awaited_once()
+    assert psub.fetch.await_args.args[0] == 1
+    assert [m["data"] for m in result["messages"]] == ["again"]
+
+
 async def test_fetch_timeout_returns_empty(
     hass: HomeAssistant, entry: MockConfigEntry, nc: MagicMock
 ) -> None:
     """A pull that times out is an empty result, not an error."""
     psub = MagicMock()
-    psub.consumer_info = AsyncMock(return_value=SimpleNamespace(num_pending=3))
+    psub.consumer_info = AsyncMock(return_value=SimpleNamespace(num_pending=3, num_ack_pending=0))
     psub.fetch = AsyncMock(side_effect=NatsTimeoutError())
     nc.jetstream.return_value.pull_subscribe_bind = AsyncMock(return_value=psub)
 

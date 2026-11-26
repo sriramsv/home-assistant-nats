@@ -175,3 +175,38 @@ async def test_publish_jetstream_without_stream_errors(hass: HomeAssistant, entr
             blocking=True,
             return_response=True,
         )
+
+
+async def test_fetch_redelivers_unacked_after_ack_wait(hass: HomeAssistant, entry, nc) -> None:
+    """A peeked (ack: false) message comes back from fetch once ack_wait passes."""
+    from nats.js.api import ConsumerConfig
+
+    js = nc.jetstream()
+    await js.add_stream(name="LIVE_R", subjects=["live.redeliver"])
+    await js.add_consumer(
+        "LIVE_R",
+        ConsumerConfig(durable_name="digest", ack_policy="explicit", ack_wait=1),
+    )
+    try:
+        await js.publish("live.redeliver", b"again")
+        peek = await hass.services.async_call(
+            DOMAIN,
+            "fetch",
+            {"stream": "LIVE_R", "consumer": "digest", "ack": False},
+            blocking=True,
+            return_response=True,
+        )
+        assert peek["messages"][0]["num_delivered"] == 1
+
+        await asyncio.sleep(1.5)
+        again = await hass.services.async_call(
+            DOMAIN,
+            "fetch",
+            {"stream": "LIVE_R", "consumer": "digest"},
+            blocking=True,
+            return_response=True,
+        )
+        assert [m["data"] for m in again["messages"]] == ["again"]
+        assert again["messages"][0]["num_delivered"] == 2
+    finally:
+        await js.delete_stream("LIVE_R")

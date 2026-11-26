@@ -145,10 +145,12 @@ async def _async_fetch(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]
     consumer: str = call.data[ATTR_CONSUMER]
     try:
         psub = await nc.jetstream().pull_subscribe_bind(consumer, stream=stream)
-        # Cap the pull at what is pending so a short queue returns at once
-        # instead of waiting out the timeout for a full batch.
-        pending = (await psub.consumer_info()).num_pending
-        count = min(call.data[ATTR_BATCH], pending)
+        # Cap the pull at what the consumer can deliver so a short queue returns
+        # at once instead of waiting out the timeout for a full batch. Count
+        # num_ack_pending too: a message delivered but never acked is redelivered
+        # after ack_wait, and JetStream counts it there, not in num_pending.
+        info = await psub.consumer_info()
+        count = min(call.data[ATTR_BATCH], info.num_pending + info.num_ack_pending)
         if count < 1:
             return {"messages": []}
         try:
