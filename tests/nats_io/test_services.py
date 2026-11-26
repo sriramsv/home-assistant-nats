@@ -40,6 +40,7 @@ def nc() -> MagicMock:
     client.subscribe = AsyncMock()
     client.publish = AsyncMock()
     client.drain = AsyncMock()
+    client.is_closed = False
     client.jetstream.return_value = MagicMock()
     return client
 

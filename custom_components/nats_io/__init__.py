@@ -12,7 +12,7 @@ import nats
 from nats.aio.client import Client as NatsClient
 from nats.aio.msg import Msg as NatsMsg
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -34,6 +34,8 @@ from .const import DOMAIN
 from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
+
+RECONNECT_TIME_WAIT = 2
 
 type NatsIoConfigEntry = ConfigEntry[NatsClient]
 
@@ -76,6 +78,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: NatsIoConfigEntry) -> bo
     async def _reconnected_cb() -> None:
         _LOGGER.info("Reconnected to NATS broker at %s:%s", host, port)
 
+    async def _closed_cb() -> None:
+        # Safety net: if the client ever ends up permanently closed, reload the
+        # entry to build a fresh connection. Skipped during our own unload.
+        if entry.state is not ConfigEntryState.LOADED:
+            return
+        _LOGGER.warning(
+            "NATS connection to %s:%s closed; reloading the integration", host, port
+        )
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+
     try:
         nc = await nats.connect(
             servers=[f"{scheme}://{host}:{port}"],
@@ -85,6 +97,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: NatsIoConfigEntry) -> bo
             error_cb=_error_cb,
             disconnected_cb=_disconnected_cb,
             reconnected_cb=_reconnected_cb,
+            closed_cb=_closed_cb,
+            # nats-py defaults to 60 attempts (~2 min) and then closes for good.
+            max_reconnect_attempts=-1,
+            reconnect_time_wait=RECONNECT_TIME_WAIT,
         )
     except Exception as err:
         raise ConfigEntryNotReady(
@@ -230,5 +246,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: NatsIoConfigEntry) -> bo
 
 async def async_unload_entry(hass: HomeAssistant, entry: NatsIoConfigEntry) -> bool:
     """Unload a NATS config entry."""
-    await entry.runtime_data.drain()
+    nc = entry.runtime_data
+    if not nc.is_closed:
+        await nc.drain()
     return True
